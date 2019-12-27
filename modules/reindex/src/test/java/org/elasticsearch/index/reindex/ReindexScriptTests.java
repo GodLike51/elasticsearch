@@ -21,16 +21,18 @@ package org.elasticsearch.index.reindex;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.lucene.uid.Versions;
+import org.elasticsearch.script.ScriptService;
+import org.mockito.Mockito;
 
 import java.util.Map;
 
-import static org.elasticsearch.common.unit.TimeValue.timeValueMillis;
 import static org.hamcrest.Matchers.containsString;
 
 /**
  * Tests index-by-search with a script modifying the documents.
  */
-public class ReindexScriptTests extends AbstractAsyncBulkIndexByScrollActionScriptTestCase<ReindexRequest, ReindexResponse> {
+public class ReindexScriptTests extends AbstractAsyncBulkByScrollActionScriptTestCase<ReindexRequest, BulkByScrollResponse> {
+
     public void testSetIndex() throws Exception {
         Object dest = randomFrom(new Object[] {234, 234L, "pancake"});
         IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_index", dest));
@@ -42,20 +44,6 @@ public class ReindexScriptTests extends AbstractAsyncBulkIndexByScrollActionScri
             applyScript((Map<String, Object> ctx) -> ctx.put("_index", null));
         } catch (NullPointerException e) {
             assertThat(e.getMessage(), containsString("Can't reindex without a destination index!"));
-        }
-    }
-
-    public void testSetType() throws Exception {
-        Object type = randomFrom(new Object[] {234, 234L, "pancake"});
-        IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_type", type));
-        assertEquals(type.toString(), index.type());
-    }
-
-    public void testSettingTypeToNullIsError() throws Exception {
-        try {
-            applyScript((Map<String, Object> ctx) -> ctx.put("_type", null));
-        } catch (NullPointerException e) {
-            assertThat(e.getMessage(), containsString("Can't reindex without a destination type!"));
         }
     }
 
@@ -89,42 +77,10 @@ public class ReindexScriptTests extends AbstractAsyncBulkIndexByScrollActionScri
         }
     }
 
-    public void testSetParent() throws Exception {
-        String parent = randomRealisticUnicodeOfLengthBetween(5, 20);
-        IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_parent", parent));
-        assertEquals(parent, index.parent());
-    }
-
     public void testSetRouting() throws Exception {
         String routing = randomRealisticUnicodeOfLengthBetween(5, 20);
         IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_routing", routing));
         assertEquals(routing, index.routing());
-    }
-
-    public void testSetTimestamp() throws Exception {
-        String timestamp = randomFrom(null, "now", "1234");
-        IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_timestamp", timestamp));
-        assertEquals(timestamp, index.timestamp());
-    }
-
-    public void testSetTtl() throws Exception {
-        Number ttl = randomFrom(new Number[] { null, 1233214, 134143797143L });
-        IndexRequest index = applyScript((Map<String, Object> ctx) -> ctx.put("_ttl", ttl));
-        if (ttl == null) {
-            assertEquals(null, index.ttl());
-        } else {
-            assertEquals(timeValueMillis(ttl.longValue()), index.ttl());
-        }
-    }
-
-    public void testSettingTtlToJunkIsAnError() throws Exception {
-        Object junkTtl = randomFrom(new Object[] { "junk", Math.PI });
-        try {
-            applyScript((Map<String, Object> ctx) -> ctx.put("_ttl", junkTtl));
-        } catch (IllegalArgumentException e) {
-            assertThat(e.getMessage(), containsString("_ttl may only be set to an int or a long but was ["));
-            assertThat(e.getMessage(), containsString(junkTtl.toString()));
-        }
     }
 
     @Override
@@ -133,7 +89,8 @@ public class ReindexScriptTests extends AbstractAsyncBulkIndexByScrollActionScri
     }
 
     @Override
-    protected AbstractAsyncBulkIndexByScrollAction<ReindexRequest, ReindexResponse> action() {
-        return new TransportReindexAction.AsyncIndexBySearchAction(task, logger, null, null, threadPool, request(), listener());
+    protected Reindexer.AsyncIndexBySearchAction action(ScriptService scriptService, ReindexRequest request) {
+        ReindexSslConfig sslConfig = Mockito.mock(ReindexSslConfig.class);
+        return new Reindexer.AsyncIndexBySearchAction(task, logger, null, threadPool, scriptService, sslConfig, request, listener());
     }
 }

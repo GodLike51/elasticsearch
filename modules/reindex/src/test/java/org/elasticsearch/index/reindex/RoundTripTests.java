@@ -19,189 +19,183 @@
 
 package org.elasticsearch.index.reindex;
 
-import org.elasticsearch.action.WriteConsistencyLevel;
-import org.elasticsearch.action.bulk.BulkItemResponse.Failure;
-import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.search.SearchRequest;
-import org.elasticsearch.action.search.ShardSearchFailure;
+import org.elasticsearch.Version;
+import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.lucene.uid.Versions;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.index.Index;
-import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.script.Script;
-import org.elasticsearch.script.ScriptService.ScriptType;
-import org.elasticsearch.search.SearchShardTarget;
+import org.elasticsearch.script.ScriptType;
+import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
-import java.util.List;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
-import static java.lang.Math.abs;
-import static java.util.Collections.emptyList;
-import static java.util.Collections.emptyMap;
-import static java.util.Collections.singletonList;
 import static org.apache.lucene.util.TestUtil.randomSimpleString;
 import static org.elasticsearch.common.unit.TimeValue.parseTimeValue;
-import static org.elasticsearch.common.unit.TimeValue.timeValueMillis;
 
 /**
- * Round trip tests for all Streamable things declared in this plugin.
+ * Round trip tests for all {@link Writeable} things declared in this plugin.
  */
 public class RoundTripTests extends ESTestCase {
     public void testReindexRequest() throws IOException {
-        ReindexRequest reindex = new ReindexRequest(new SearchRequest(), new IndexRequest());
+        ReindexRequest reindex = new ReindexRequest();
         randomRequest(reindex);
         reindex.getDestination().version(randomFrom(Versions.MATCH_ANY, Versions.MATCH_DELETED, 12L, 1L, 123124L, 12L));
         reindex.getDestination().index("test");
-        ReindexRequest tripped = new ReindexRequest();
-        roundTrip(reindex, tripped);
+        if (randomBoolean()) {
+            int port = between(1, Integer.MAX_VALUE);
+            BytesReference query = new BytesArray("{\"match_all\":{}}");
+            String username = randomBoolean() ? randomAlphaOfLength(5) : null;
+            String password = username != null && randomBoolean() ? randomAlphaOfLength(5) : null;
+            int headersCount = randomBoolean() ? 0 : between(1, 10);
+            Map<String, String> headers = new HashMap<>(headersCount);
+            while (headers.size() < headersCount) {
+                headers.put(randomAlphaOfLength(5), randomAlphaOfLength(5));
+            }
+            TimeValue socketTimeout = parseTimeValue(randomPositiveTimeValue(), "socketTimeout");
+            TimeValue connectTimeout = parseTimeValue(randomPositiveTimeValue(), "connectTimeout");
+            reindex.setRemoteInfo(
+                new RemoteInfo(randomAlphaOfLength(5), randomAlphaOfLength(5), port, null,
+                    query, username, password, headers, socketTimeout, connectTimeout));
+        }
+        ReindexRequest tripped = new ReindexRequest(toInputByteStream(reindex));
         assertRequestEquals(reindex, tripped);
-        assertEquals(reindex.getDestination().version(), tripped.getDestination().version());
-        assertEquals(reindex.getDestination().index(), tripped.getDestination().index());
+
+        // Try regular slices with a version that doesn't support slices=auto, which should succeed
+        reindex.setSlices(between(1, Integer.MAX_VALUE));
+        tripped = new ReindexRequest(toInputByteStream(reindex));
+        assertRequestEquals(reindex, tripped);
     }
 
     public void testUpdateByQueryRequest() throws IOException {
-        UpdateByQueryRequest update = new UpdateByQueryRequest(new SearchRequest());
+        UpdateByQueryRequest update = new UpdateByQueryRequest();
         randomRequest(update);
-        UpdateByQueryRequest tripped = new UpdateByQueryRequest();
-        roundTrip(update, tripped);
+        if (randomBoolean()) {
+            update.setPipeline(randomAlphaOfLength(5));
+        }
+        UpdateByQueryRequest tripped = new UpdateByQueryRequest(toInputByteStream(update));
         assertRequestEquals(update, tripped);
+        assertEquals(update.getPipeline(), tripped.getPipeline());
+
+        // Try regular slices with a version that doesn't support slices=auto, which should succeed
+        update.setSlices(between(1, Integer.MAX_VALUE));
+        tripped = new UpdateByQueryRequest(toInputByteStream(update));
+        assertRequestEquals(update, tripped);
+        assertEquals(update.getPipeline(), tripped.getPipeline());
     }
 
-    private void randomRequest(AbstractBulkIndexByScrollRequest<?> request) {
+    public void testDeleteByQueryRequest() throws IOException {
+        DeleteByQueryRequest delete = new DeleteByQueryRequest();
+        randomRequest(delete);
+        DeleteByQueryRequest tripped = new DeleteByQueryRequest(toInputByteStream(delete));
+        assertRequestEquals(delete, tripped);
+
+        // Try regular slices with a version that doesn't support slices=auto, which should succeed
+        delete.setSlices(between(1, Integer.MAX_VALUE));
+        tripped = new DeleteByQueryRequest(toInputByteStream(delete));
+        assertRequestEquals(delete, tripped);
+    }
+
+    private void randomRequest(AbstractBulkByScrollRequest<?> request) {
         request.getSearchRequest().indices("test");
         request.getSearchRequest().source().size(between(1, 1000));
-        request.setSize(random().nextBoolean() ? between(1, Integer.MAX_VALUE) : -1);
+        if (randomBoolean()) {
+            request.setMaxDocs(between(1, Integer.MAX_VALUE));
+        }
         request.setAbortOnVersionConflict(random().nextBoolean());
         request.setRefresh(rarely());
         request.setTimeout(TimeValue.parseTimeValue(randomTimeValue(), null, "test"));
-        request.setConsistency(randomFrom(WriteConsistencyLevel.values()));
-        request.setScript(random().nextBoolean() ? null : randomScript());
+        request.setWaitForActiveShards(randomIntBetween(0, 10));
         request.setRequestsPerSecond(between(0, Integer.MAX_VALUE));
+
+        int slices = ReindexTestCase.randomSlices(1, Integer.MAX_VALUE);
+        request.setSlices(slices);
+    }
+
+    private void randomRequest(AbstractBulkIndexByScrollRequest<?> request) {
+        randomRequest((AbstractBulkByScrollRequest<?>) request);
+        request.setScript(random().nextBoolean() ? null : randomScript());
+    }
+
+    private void assertRequestEquals(ReindexRequest request, ReindexRequest tripped) {
+        assertRequestEquals((AbstractBulkIndexByScrollRequest<?>) request, (AbstractBulkIndexByScrollRequest<?>) tripped);
+        assertEquals(request.getDestination().version(), tripped.getDestination().version());
+        assertEquals(request.getDestination().index(), tripped.getDestination().index());
+        if (request.getRemoteInfo() == null) {
+            assertNull(tripped.getRemoteInfo());
+        } else {
+            assertNotNull(tripped.getRemoteInfo());
+            assertEquals(request.getRemoteInfo().getScheme(), tripped.getRemoteInfo().getScheme());
+            assertEquals(request.getRemoteInfo().getHost(), tripped.getRemoteInfo().getHost());
+            assertEquals(request.getRemoteInfo().getQuery(), tripped.getRemoteInfo().getQuery());
+            assertEquals(request.getRemoteInfo().getUsername(), tripped.getRemoteInfo().getUsername());
+            assertEquals(request.getRemoteInfo().getPassword(), tripped.getRemoteInfo().getPassword());
+            assertEquals(request.getRemoteInfo().getHeaders(), tripped.getRemoteInfo().getHeaders());
+            assertEquals(request.getRemoteInfo().getSocketTimeout(), tripped.getRemoteInfo().getSocketTimeout());
+            assertEquals(request.getRemoteInfo().getConnectTimeout(), tripped.getRemoteInfo().getConnectTimeout());
+        }
     }
 
     private void assertRequestEquals(AbstractBulkIndexByScrollRequest<?> request,
             AbstractBulkIndexByScrollRequest<?> tripped) {
+        assertRequestEquals((AbstractBulkByScrollRequest<?>) request, (AbstractBulkByScrollRequest<?>) tripped);
+        assertEquals(request.getScript(), tripped.getScript());
+    }
+
+    private void assertRequestEquals(AbstractBulkByScrollRequest<?> request, AbstractBulkByScrollRequest<?> tripped) {
         assertArrayEquals(request.getSearchRequest().indices(), tripped.getSearchRequest().indices());
         assertEquals(request.getSearchRequest().source().size(), tripped.getSearchRequest().source().size());
         assertEquals(request.isAbortOnVersionConflict(), tripped.isAbortOnVersionConflict());
         assertEquals(request.isRefresh(), tripped.isRefresh());
         assertEquals(request.getTimeout(), tripped.getTimeout());
-        assertEquals(request.getConsistency(), tripped.getConsistency());
-        assertEquals(request.getScript(), tripped.getScript());
+        assertEquals(request.getWaitForActiveShards(), tripped.getWaitForActiveShards());
         assertEquals(request.getRetryBackoffInitialTime(), tripped.getRetryBackoffInitialTime());
         assertEquals(request.getMaxRetries(), tripped.getMaxRetries());
         assertEquals(request.getRequestsPerSecond(), tripped.getRequestsPerSecond(), 0d);
     }
 
-    public void testBulkByTaskStatus() throws IOException {
-        BulkByScrollTask.Status status = randomStatus();
-        BytesStreamOutput out = new BytesStreamOutput();
-        status.writeTo(out);
-        BulkByScrollTask.Status tripped = new BulkByScrollTask.Status(out.bytes().streamInput());
-        assertTaskStatusEquals(status, tripped);
-    }
-
-    public void testReindexResponse() throws IOException {
-        ReindexResponse response = new ReindexResponse(timeValueMillis(randomPositiveLong()), randomStatus(), randomIndexingFailures(),
-                randomSearchFailures(), randomBoolean());
-        ReindexResponse tripped = new ReindexResponse();
-        roundTrip(response, tripped);
-        assertResponseEquals(response, tripped);
-    }
-
-    public void testBulkIndexByScrollResponse() throws IOException {
-        BulkIndexByScrollResponse response = new BulkIndexByScrollResponse(timeValueMillis(randomPositiveLong()), randomStatus(),
-                randomIndexingFailures(), randomSearchFailures(), randomBoolean());
-        BulkIndexByScrollResponse tripped = new BulkIndexByScrollResponse();
-        roundTrip(response, tripped);
-        assertResponseEquals(response, tripped);
-    }
-
-    private BulkByScrollTask.Status randomStatus() {
-        return new BulkByScrollTask.Status(randomPositiveLong(), randomPositiveLong(), randomPositiveLong(), randomPositiveLong(),
-                randomPositiveInt(), randomPositiveLong(), randomPositiveLong(), randomPositiveLong(),
-                parseTimeValue(randomPositiveTimeValue(), "test"), abs(random().nextFloat()),
-                random().nextBoolean() ? null : randomSimpleString(random()), parseTimeValue(randomPositiveTimeValue(), "test"));
-    }
-
-    private List<Failure> randomIndexingFailures() {
-        return usually() ? emptyList()
-                : singletonList(new Failure(randomSimpleString(random()), randomSimpleString(random()),
-                        randomSimpleString(random()), new IllegalArgumentException("test")));
-    }
-
-    private List<ShardSearchFailure> randomSearchFailures() {
-        if (usually()) {
-            return emptyList();
+    public void testRethrottleRequest() throws IOException {
+        RethrottleRequest request = new RethrottleRequest();
+        request.setRequestsPerSecond((float) randomDoubleBetween(0, Float.POSITIVE_INFINITY, false));
+        if (randomBoolean()) {
+            request.setActions(randomFrom(UpdateByQueryAction.NAME, ReindexAction.NAME));
+        } else {
+            request.setTaskId(new TaskId(randomAlphaOfLength(5), randomLong()));
         }
-        Index index = new Index(randomSimpleString(random()), "uuid");
-        return singletonList(new ShardSearchFailure(randomSimpleString(random()),
-                new SearchShardTarget(randomSimpleString(random()), index, randomInt()), randomFrom(RestStatus.values())));
+        RethrottleRequest tripped = new RethrottleRequest(toInputByteStream(request));
+        assertEquals(request.getRequestsPerSecond(), tripped.getRequestsPerSecond(), 0.00001);
+        assertArrayEquals(request.getActions(), tripped.getActions());
+        assertEquals(request.getTaskId(), tripped.getTaskId());
     }
 
-    private void roundTrip(Streamable example, Streamable empty) throws IOException {
+    private StreamInput toInputByteStream(Writeable example) throws IOException {
+        return toInputByteStream(Version.CURRENT, example);
+    }
+
+    private StreamInput toInputByteStream(Version version, Writeable example) throws IOException {
         BytesStreamOutput out = new BytesStreamOutput();
+        out.setVersion(version);
         example.writeTo(out);
-        empty.readFrom(out.bytes().streamInput());
+        StreamInput in = out.bytes().streamInput();
+        in.setVersion(version);
+        return in;
     }
 
     private Script randomScript() {
-        return new Script(randomSimpleString(random()), // Name
-                randomFrom(ScriptType.values()), // Type
-                random().nextBoolean() ? null : randomSimpleString(random()), // Language
-                emptyMap()); // Params
-    }
+        ScriptType type = randomFrom(ScriptType.values());
+        String lang = random().nextBoolean() ? Script.DEFAULT_SCRIPT_LANG : randomSimpleString(random());
+        String idOrCode = randomSimpleString(random());
+        Map<String, Object> params = Collections.emptyMap();
 
-    private long randomPositiveLong() {
-        long l;
-        do {
-            l = randomLong();
-        } while (l < 0);
-        return l;
-    }
+        type = ScriptType.STORED;
 
-    private int randomPositiveInt() {
-        return randomInt(Integer.MAX_VALUE);
-    }
-
-    private void assertResponseEquals(BulkIndexByScrollResponse expected, BulkIndexByScrollResponse actual) {
-        assertEquals(expected.getTook(), actual.getTook());
-        assertTaskStatusEquals(expected.getStatus(), actual.getStatus());
-        assertEquals(expected.getIndexingFailures().size(), actual.getIndexingFailures().size());
-        for (int i = 0; i < expected.getIndexingFailures().size(); i++) {
-            Failure expectedFailure = expected.getIndexingFailures().get(i);
-            Failure actualFailure = actual.getIndexingFailures().get(i);
-            assertEquals(expectedFailure.getIndex(), actualFailure.getIndex());
-            assertEquals(expectedFailure.getType(), actualFailure.getType());
-            assertEquals(expectedFailure.getId(), actualFailure.getId());
-            assertEquals(expectedFailure.getMessage(), actualFailure.getMessage());
-            assertEquals(expectedFailure.getStatus(), actualFailure.getStatus());
-        }
-        assertEquals(expected.getSearchFailures().size(), actual.getSearchFailures().size());
-        for (int i = 0; i < expected.getSearchFailures().size(); i++) {
-            ShardSearchFailure expectedFailure = expected.getSearchFailures().get(i);
-            ShardSearchFailure actualFailure = actual.getSearchFailures().get(i);
-            assertEquals(expectedFailure.shard(), actualFailure.shard());
-            assertEquals(expectedFailure.status(), actualFailure.status());
-            // We can't use getCause because throwable doesn't implement equals
-            assertEquals(expectedFailure.reason(), actualFailure.reason());
-        }
-    }
-
-    private void assertTaskStatusEquals(BulkByScrollTask.Status expected, BulkByScrollTask.Status actual) {
-        assertEquals(expected.getUpdated(), actual.getUpdated());
-        assertEquals(expected.getCreated(), actual.getCreated());
-        assertEquals(expected.getDeleted(), actual.getDeleted());
-        assertEquals(expected.getBatches(), actual.getBatches());
-        assertEquals(expected.getVersionConflicts(), actual.getVersionConflicts());
-        assertEquals(expected.getNoops(), actual.getNoops());
-        assertEquals(expected.getRetries(), actual.getRetries());
-        assertEquals(expected.getThrottled(), actual.getThrottled());
-        assertEquals(expected.getRequestsPerSecond(), actual.getRequestsPerSecond(), 0f);
-        assertEquals(expected.getReasonCancelled(), actual.getReasonCancelled());
-        assertEquals(expected.getThrottledUntil(), actual.getThrottledUntil());
+        return new Script(type, type == ScriptType.STORED ? null : lang, idOrCode, params);
     }
 }

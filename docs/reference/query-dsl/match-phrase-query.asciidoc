@@ -1,14 +1,20 @@
 [[query-dsl-match-query-phrase]]
-=== Match Phrase Query
+=== Match phrase query
+++++
+<titleabbrev>Match phrase</titleabbrev>
+++++
 
 The `match_phrase` query analyzes the text and creates a `phrase` query
 out of the analyzed text. For example:
 
-[source,js]
+[source,console]
 --------------------------------------------------
+GET /_search
 {
-    "match_phrase" : {
-        "message" : "this is a test"
+    "query": {
+        "match_phrase" : {
+            "message" : "this is a test"
+        }
     }
 }
 --------------------------------------------------
@@ -20,14 +26,19 @@ The `analyzer` can be set to control which analyzer will perform the
 analysis process on the text. It defaults to the field explicit mapping
 definition, or the default search analyzer, for example:
 
-[source,js]
+[source,console]
 --------------------------------------------------
+GET /_search
 {
-    "match_phrase" : {
-        "message" : {
-            "query" : "this is a test",
-            "analyzer" : "my_analyzer"
+    "query": {
+        "match_phrase" : {
+            "message" : {
+                "query" : "this is a test",
+                "analyzer" : "my_analyzer"
+            }
         }
     }
 }
 --------------------------------------------------
+
+This query also accepts `zero_terms_query`, as explained in <<query-dsl-match-query, `match` query>>.
